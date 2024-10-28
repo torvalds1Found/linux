@@ -293,7 +293,7 @@ static const struct snd_soc_acpi_adr_device rt1318_1_single_adr[] = {
 		.adr = 0x000130025D131801,
 		.num_endpoints = 1,
 		.endpoints = &single_endpoint,
-		.name_prefix = "rt1318"
+		.name_prefix = "rt1318-1"
 	}
 };
 
@@ -674,6 +674,7 @@ static const struct snd_soc_acpi_link_adr mtl_cs42l43_l0[] = {
 		.num_adr = ARRAY_SIZE(cs42l43_0_adr),
 		.adr_d = cs42l43_0_adr,
 	},
+	{}
 };
 
 static const struct snd_soc_acpi_link_adr mtl_cs42l43_cs35l56[] = {

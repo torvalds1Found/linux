@@ -76,12 +76,16 @@ ssize_t sized_strscpy(char *, const char *, size_t);
  * known size.
  */
 #define __strscpy0(dst, src, ...)	\
-	sized_strscpy(dst, src, sizeof(dst) + __must_be_array(dst))
-#define __strscpy1(dst, src, size)	sized_strscpy(dst, src, size)
+	sized_strscpy(dst, src, sizeof(dst) + __must_be_array(dst) +	\
+				__must_be_cstr(dst) + __must_be_cstr(src))
+#define __strscpy1(dst, src, size)	\
+	sized_strscpy(dst, src, size + __must_be_cstr(dst) + __must_be_cstr(src))
 
 #define __strscpy_pad0(dst, src, ...)	\
-	sized_strscpy_pad(dst, src, sizeof(dst) + __must_be_array(dst))
-#define __strscpy_pad1(dst, src, size)	sized_strscpy_pad(dst, src, size)
+	sized_strscpy_pad(dst, src, sizeof(dst) + __must_be_array(dst) +	\
+				    __must_be_cstr(dst) + __must_be_cstr(src))
+#define __strscpy_pad1(dst, src, size)	\
+	sized_strscpy_pad(dst, src, size + __must_be_cstr(dst) + __must_be_cstr(src))
 
 /**
  * strscpy - Copy a C-string into a sized buffer
@@ -279,6 +283,18 @@ static inline void memcpy_flushcache(void *dst, const void *src, size_t cnt)
 void *memchr_inv(const void *s, int c, size_t n);
 char *strreplace(char *str, char old, char new);
 
+/**
+ * mem_is_zero - Check if an area of memory is all 0's.
+ * @s: The memory area
+ * @n: The size of the area
+ *
+ * Return: True if the area of memory is all 0's.
+ */
+static inline bool mem_is_zero(const void *s, size_t n)
+{
+	return !memchr_inv(s, 0, n);
+}
+
 extern void kfree_const(const void *x);
 
 extern char *kstrdup(const char *s, gfp_t gfp) __malloc;
@@ -289,7 +305,7 @@ extern void *kmemdup_noprof(const void *src, size_t len, gfp_t gfp) __realloc_si
 
 extern void *kvmemdup(const void *src, size_t len, gfp_t gfp) __realloc_size(2);
 extern char *kmemdup_nul(const char *s, size_t len, gfp_t gfp);
-extern void *kmemdup_array(const void *src, size_t element_size, size_t count, gfp_t gfp)
+extern void *kmemdup_array(const void *src, size_t count, size_t element_size, gfp_t gfp)
 		__realloc_size(2, 3);
 
 /* lib/argv_split.c */

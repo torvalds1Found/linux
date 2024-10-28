@@ -19,12 +19,11 @@
 #define KERNEL_DS	0x10
 #define KERNEL_TSS	0x18
 
-#define MAX_NR_CPUID_ENTRIES 100
-
 vm_vaddr_t exception_handlers;
 bool host_cpu_is_amd;
 bool host_cpu_is_intel;
 bool is_forced_emulation_enabled;
+uint64_t guest_tsc_khz;
 
 static void regs_dump(FILE *stream, struct kvm_regs *regs, uint8_t indent)
 {
@@ -565,10 +564,8 @@ void route_exception(struct ex_regs *regs)
 	if (kvm_fixup_exception(regs))
 		return;
 
-	ucall_assert(UCALL_UNHANDLED,
-		     "Unhandled exception in guest", __FILE__, __LINE__,
-		     "Unhandled exception '0x%lx' at guest RIP '0x%lx'",
-		     regs->vector, regs->rip);
+	GUEST_FAIL("Unhandled exception '0x%lx' at guest RIP '0x%lx'",
+		   regs->vector, regs->rip);
 }
 
 static void vm_init_descriptor_tables(struct kvm_vm *vm)
@@ -610,12 +607,17 @@ void assert_on_unhandled_exception(struct kvm_vcpu *vcpu)
 {
 	struct ucall uc;
 
-	if (get_ucall(vcpu, &uc) == UCALL_UNHANDLED)
+	if (get_ucall(vcpu, &uc) == UCALL_ABORT)
 		REPORT_GUEST_ASSERT(uc);
 }
 
 void kvm_arch_vm_post_create(struct kvm_vm *vm)
 {
+	int r;
+
+	TEST_ASSERT(kvm_has_cap(KVM_CAP_GET_TSC_KHZ),
+		    "Require KVM_GET_TSC_KHZ to provide udelay() to guest.");
+
 	vm_create_irqchip(vm);
 	vm_init_descriptor_tables(vm);
 
@@ -628,6 +630,11 @@ void kvm_arch_vm_post_create(struct kvm_vm *vm)
 
 		vm_sev_ioctl(vm, KVM_SEV_INIT2, &init);
 	}
+
+	r = __vm_ioctl(vm, KVM_GET_TSC_KHZ, NULL);
+	TEST_ASSERT(r > 0, "KVM_GET_TSC_KHZ did not provide a valid TSC frequency.");
+	guest_tsc_khz = r;
+	sync_global_to_guest(vm, guest_tsc_khz);
 }
 
 void vcpu_arch_set_entry_point(struct kvm_vcpu *vcpu, void *guest_code)
@@ -1184,72 +1191,24 @@ void xen_hypercall(uint64_t nr, uint64_t a0, void *a1)
 	GUEST_ASSERT(!__xen_hypercall(nr, a0, a1));
 }
 
-const struct kvm_cpuid2 *kvm_get_supported_hv_cpuid(void)
-{
-	static struct kvm_cpuid2 *cpuid;
-	int kvm_fd;
-
-	if (cpuid)
-		return cpuid;
-
-	cpuid = allocate_kvm_cpuid2(MAX_NR_CPUID_ENTRIES);
-	kvm_fd = open_kvm_dev_path_or_exit();
-
-	kvm_ioctl(kvm_fd, KVM_GET_SUPPORTED_HV_CPUID, cpuid);
-
-	close(kvm_fd);
-	return cpuid;
-}
-
-void vcpu_set_hv_cpuid(struct kvm_vcpu *vcpu)
-{
-	static struct kvm_cpuid2 *cpuid_full;
-	const struct kvm_cpuid2 *cpuid_sys, *cpuid_hv;
-	int i, nent = 0;
-
-	if (!cpuid_full) {
-		cpuid_sys = kvm_get_supported_cpuid();
-		cpuid_hv = kvm_get_supported_hv_cpuid();
-
-		cpuid_full = allocate_kvm_cpuid2(cpuid_sys->nent + cpuid_hv->nent);
-		if (!cpuid_full) {
-			perror("malloc");
-			abort();
-		}
-
-		/* Need to skip KVM CPUID leaves 0x400000xx */
-		for (i = 0; i < cpuid_sys->nent; i++) {
-			if (cpuid_sys->entries[i].function >= 0x40000000 &&
-			    cpuid_sys->entries[i].function < 0x40000100)
-				continue;
-			cpuid_full->entries[nent] = cpuid_sys->entries[i];
-			nent++;
-		}
-
-		memcpy(&cpuid_full->entries[nent], cpuid_hv->entries,
-		       cpuid_hv->nent * sizeof(struct kvm_cpuid_entry2));
-		cpuid_full->nent = nent + cpuid_hv->nent;
-	}
-
-	vcpu_init_cpuid(vcpu, cpuid_full);
-}
-
-const struct kvm_cpuid2 *vcpu_get_supported_hv_cpuid(struct kvm_vcpu *vcpu)
-{
-	struct kvm_cpuid2 *cpuid = allocate_kvm_cpuid2(MAX_NR_CPUID_ENTRIES);
-
-	vcpu_ioctl(vcpu, KVM_GET_SUPPORTED_HV_CPUID, cpuid);
-
-	return cpuid;
-}
-
 unsigned long vm_compute_max_gfn(struct kvm_vm *vm)
 {
 	const unsigned long num_ht_pages = 12 << (30 - vm->page_shift); /* 12 GiB */
 	unsigned long ht_gfn, max_gfn, max_pfn;
-	uint8_t maxphyaddr;
+	uint8_t maxphyaddr, guest_maxphyaddr;
 
-	max_gfn = (1ULL << (vm->pa_bits - vm->page_shift)) - 1;
+	/*
+	 * Use "guest MAXPHYADDR" from KVM if it's available.  Guest MAXPHYADDR
+	 * enumerates the max _mappable_ GPA, which can be less than the raw
+	 * MAXPHYADDR, e.g. if MAXPHYADDR=52, KVM is using TDP, and the CPU
+	 * doesn't support 5-level TDP.
+	 */
+	guest_maxphyaddr = kvm_cpu_property(X86_PROPERTY_GUEST_MAX_PHY_ADDR);
+	guest_maxphyaddr = guest_maxphyaddr ?: vm->pa_bits;
+	TEST_ASSERT(guest_maxphyaddr <= vm->pa_bits,
+		    "Guest MAXPHYADDR should never be greater than raw MAXPHYADDR");
+
+	max_gfn = (1ULL << (guest_maxphyaddr - vm->page_shift)) - 1;
 
 	/* Avoid reserved HyperTransport region on AMD processors.  */
 	if (!host_cpu_is_amd)
